@@ -1,0 +1,28 @@
+schema: spec-driven
+
+context: |
+  Darjeeling: React + TypeScript + Vite + PixiJS 的侧视台阶建造与物流原型。
+  整数 (column, level)，正方形格子，列宽等于固定台阶高度且等比显示；air 不支撑建筑或道路；实体地面显式声明支撑和可行走性。
+  普通建筑只在单台阶横向占地，视觉高度与遮挡独立。野路底边可升级石板路、水泥路。
+  攀爬/1 格楼梯/2 或 3 格斜坡只跨相邻台阶；车辆仅可使用水平道路与斜坡。
+  工人主动分配到一个工作地点或点对点运输线，路线失效必须停止并重算。
+  完整背景与待定路线见 docs/project-overview.md；领域层不依赖 React/PixiJS。
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+# Example:
+#   context: |
+#     Tech stack: TypeScript, React, Node.js
+#     We use conventional commits
+#     Domain: e-commerce platform
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours

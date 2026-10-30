@@ -1,0 +1,200 @@
+import { expect, test, type Page } from '@playwright/test'
+
+test.use({ viewport: { width: 1440, height: 1000 } })
+test.beforeEach(async ({ page }) => {
+  await page.goto('/')
+  await expect(page.getByTestId('map-stage').locator('canvas')).toHaveCount(1)
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-scale', /\d/)
+})
+
+async function point(page: Page, column: number, level: number) {
+  const stage = page.getByTestId('map-stage'), box = await stage.boundingBox()
+  if (!box) throw new Error('Missing map viewport')
+  const data = await stage.evaluate(el => ({ ...((el as HTMLElement).dataset) }))
+  const scale = Number(data.scale)
+  return { x: box.x + Number(data.offsetX) + (column + 0.5) * Number(data.cellWidth) * scale,
+    y: box.y + Number(data.offsetY) + (Number(data.skyHeight) + (Number(data.levels) - level) * Number(data.stepHeight) - 7) * scale }
+}
+async function hover(page: Page, column: number, level: number) { const p = await point(page, column, level); await page.mouse.move(p.x, p.y) }
+async function clickCell(page: Page, column: number, level: number) { const p = await point(page, column, level); await page.mouse.click(p.x, p.y) }
+async function draft(page: Page, id: string, column: number, level: number) {
+  await page.getByRole('button', { name: '建造', exact: true }).click()
+  await page.getByTestId(`building-card-${id}`).click()
+  await clickCell(page, column, level)
+}
+async function createVehicleLine(page: Page) {
+  await page.getByRole('button', { name: '运输线', exact: true }).click()
+  await page.getByLabel('搬运主体').selectOption('vehicle')
+  await page.getByRole('button', { name: '创建运输线' }).click()
+  await expect(page.getByTestId('line-status-line-1')).toHaveText('待分配')
+}
+
+test('preserves candidate, cancel, confirmation, independent construction and new workplace registration', async ({ page }) => {
+  await draft(page, 'workshop', 15, 0)
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-cells', '15,0;16,0;17,0')
+  await hover(page, 2, 3)
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-cells', '15,0;16,0;17,0')
+  await expect(page.getByTestId('building-count')).toHaveText('0 个建筑')
+  await page.getByRole('button', { name: '取消放置' }).click()
+  await expect(page.getByTestId('candidate-controls')).toHaveCount(0)
+  await clickCell(page, 15, 0)
+  await page.getByRole('button', { name: '确认建造' }).click()
+  await expect(page.getByTestId('building-count')).toHaveText('1 个建筑')
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible({ timeout: 7000 })
+  await page.getByRole('button', { name: '人力分配' }).click()
+  await expect(page.getByLabel('阿青分配').locator('option', { hasText: '工坊' })).toHaveCount(1)
+})
+
+test('Esc and resizing preserve one Pixi canvas and its logical coordinate transform', async ({ page }) => {
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
+  await draft(page, 'lamp', 3, 0)
+  await page.keyboard.press('Escape')
+  await expect(page.getByTestId('candidate-controls')).toHaveCount(0)
+  await page.keyboard.press('Escape')
+  await expect(page.getByText('准备就绪', { exact: true })).toBeVisible()
+  await page.setViewportSize({ width: 1180, height: 760 })
+  await expect(page.getByTestId('map-stage').locator('canvas')).toHaveCount(1)
+  await draft(page, 'lamp', 3, 0)
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-cells', '3,0')
+  await expect(page.getByTestId('candidate-controls')).toBeVisible()
+  await expect(page.getByTestId('map-stage')).not.toHaveAttribute('data-error')
+  expect(errors).toEqual([])
+})
+
+test('keeps square cells and undistorted canvas dimensions after viewport resizing', async ({ page }) => {
+  const stage = page.getByTestId('map-stage')
+  for (const viewport of [{ width: 1180, height: 760 }, { width: 1440, height: 1000 }]) {
+    await page.setViewportSize(viewport)
+    await expect.poll(async () => stage.evaluate(el => {
+      const canvas = el.querySelector('canvas')!, rect = canvas.getBoundingClientRect()
+      return Math.abs(rect.width - el.clientWidth) + Math.abs(rect.height - el.clientHeight)
+    })).toBeLessThan(1)
+    const origin = await point(page, 17, 1), right = await point(page, 18, 1), above = await point(page, 17, 2)
+    expect(right.x - origin.x).toBeCloseTo(origin.y - above.y)
+    const canvas = await stage.locator('canvas').evaluate(el => {
+      const rect = el.getBoundingClientRect()
+      return { x: rect.width / el.width, y: rect.height / el.height }
+    })
+    expect(canvas.x).toBeCloseTo(canvas.y, 2)
+  }
+  await draft(page, 'ramp2', 17, 1)
+  await expect(stage).toHaveAttribute('data-preview-valid', 'true')
+  await expect(stage).toHaveAttribute('data-preview-cells', '17,1;18,1')
+  await page.screenshot({ path: 'artifacts/acceptance/terraced-square-grid.png', fullPage: true })
+})
+
+test('refuses occupied and air footprints without partial construction', async ({ page }) => {
+  await draft(page, 'lamp', 3, 0)
+  await page.getByRole('button', { name: '确认建造' }).click()
+  await page.getByTestId('building-card-cottage').click()
+  await hover(page, 3, 0)
+  await expect(page.getByText('这里已有建筑或结构占用', { exact: true })).toBeVisible()
+  await clickCell(page, 3, 0)
+  await expect(page.getByTestId('candidate-controls')).toHaveCount(0)
+  await hover(page, 10, 0)
+  await expect(page.getByText('空洞不能承载建筑或结构', { exact: true })).toBeVisible()
+  await clickCell(page, 10, 0)
+  await expect(page.getByTestId('building-count')).toHaveText('1 个建筑')
+})
+
+test('tall buildings retain single-level occupancy under visual overlap', async ({ page }) => {
+  await draft(page, 'warehouse', 19, 0)
+  await page.getByRole('button', { name: '确认建造' }).click()
+  await clickCell(page, 19, 1)
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-cells', '19,1;20,1;21,1')
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-valid', 'true')
+  await page.getByRole('button', { name: '确认建造' }).click()
+  await expect(page.getByTestId('building-count')).toHaveText('2 个建筑')
+})
+
+test('stairs and ramps validate support and reserve exactly their horizontal footprint', async ({ page }) => {
+  await page.getByTestId('building-card-ramp3').click()
+  await hover(page, 10, 0)
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-cells', '10,0;11,0;12,0')
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-valid', 'false')
+  await clickCell(page, 10, 0)
+  await expect(page.getByTestId('candidate-controls')).toHaveCount(0)
+  await draft(page, 'stairs', 19, 1)
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-cells', '19,1')
+  await page.getByRole('button', { name: '确认建造' }).click()
+  await draft(page, 'ramp2', 17, 1)
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-preview-cells', '17,1;18,1')
+  await page.getByRole('button', { name: '确认建造' }).click()
+  await page.getByTestId('building-card-lamp').click()
+  await hover(page, 17, 1)
+  await expect(page.getByText('这里已有建筑或结构占用', { exact: true })).toBeVisible()
+})
+
+test('UI controls preserve map input isolation, exclusive jobs, waiting, and ability rejection', async ({ page }) => {
+  await page.getByTestId('building-card-lamp').click()
+  await hover(page, 3, 0)
+  await createVehicleLine(page)
+  await page.getByRole('button', { name: '人力分配' }).click()
+  await page.getByLabel('阿青分配').selectOption('workplace:farm')
+  await page.getByRole('button', { name: '茶田暂停工作' }).click()
+  await expect(page.getByTestId('task-person-1')).toHaveText('等待')
+  await expect(page.getByLabel('阿青分配')).toHaveValue('workplace:farm')
+  await page.getByLabel('阿青分配').selectOption('line:line-1')
+  await expect(page.getByRole('status')).toHaveText('主体能力不符合岗位要求')
+  await expect(page.getByLabel('阿青分配')).toHaveValue('workplace:farm')
+  await page.getByLabel('货车分配').selectOption('line:line-1')
+  await expect(page.getByLabel('货车分配')).toHaveValue('line:line-1')
+  await expect(page.getByTestId('candidate-controls')).toHaveCount(0)
+  await expect(page.getByTestId('building-count')).toHaveText('0 个建筑')
+})
+
+test('road removal stops a vehicle line, reports blocked after recalculation and restores a new route', async ({ page }) => {
+  await createVehicleLine(page)
+  await page.getByRole('button', { name: '人力分配' }).click()
+  await page.getByLabel('货车分配').selectOption('line:line-1')
+  await page.getByRole('button', { name: '道路', exact: true }).click()
+  await page.getByRole('button', { name: '移除底边' }).click()
+  await page.getByRole('button', { name: '运输线', exact: true }).click()
+  await expect(page.getByTestId('line-status-line-1')).toHaveText('需要重算')
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-route-edges', '')
+  await page.getByRole('button', { name: '重算全部路线' }).click()
+  await expect(page.getByTestId('line-status-line-1')).toHaveText('阻塞')
+  await page.getByRole('button', { name: '道路', exact: true }).click()
+  await page.getByRole('button', { name: '石板路', exact: true }).click()
+  await page.getByRole('button', { name: '重算全部路线' }).click()
+  await page.getByRole('button', { name: '运输线', exact: true }).click()
+  await expect(page.getByTestId('line-status-line-1')).toHaveText('运行中')
+  await expect(page.getByTestId('map-stage')).toHaveAttribute('data-route-edges', /structure:demo-ramp/)
+})
+
+test('rejects invalid transport endpoints and a vehicle cannot replace its ramp with stairs', async ({ page }) => {
+  await page.getByRole('button', { name: '运输线', exact: true }).click()
+  await page.getByLabel('运输终点').selectOption('farm')
+  await page.getByRole('button', { name: '创建运输线' }).click()
+  await expect(page.getByRole('status')).toHaveText('请选择两个有效且不同的搬运节点')
+  await page.getByLabel('运输终点').selectOption('depot')
+  await page.getByLabel('搬运主体').selectOption('vehicle')
+  await page.getByRole('button', { name: '创建运输线' }).click()
+  await page.getByRole('button', { name: '道路', exact: true }).click()
+  await page.getByTestId('remove-demo-ramp').click()
+  await page.getByRole('button', { name: '重算全部路线' }).click()
+  await page.getByRole('button', { name: '运输线', exact: true }).click()
+  await expect(page.getByText('没有符合主体能力的完整路线', { exact: true })).toBeVisible()
+})
+
+test('saves acceptance views with air gaps, construction, stairs restriction, vehicle ramp and active transport', async ({ page }) => {
+  const errors: string[] = []; page.on('pageerror', error => errors.push(error.message))
+  await createVehicleLine(page)
+  await page.getByRole('button', { name: '人力分配' }).click()
+  await page.getByLabel('货车分配').selectOption('line:line-1')
+  await draft(page, 'workshop', 15, 0)
+  await page.getByRole('button', { name: '确认建造' }).click()
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: '运输线', exact: true }).click()
+  await expect(page.getByTestId('line-status-line-1')).toHaveText('运行中')
+  await page.screenshot({ path: 'artifacts/acceptance/terraced-active-transport.png', fullPage: true })
+  await page.getByRole('button', { name: '人力分配' }).click()
+  await page.screenshot({ path: 'artifacts/acceptance/terraced-workers.png', fullPage: true })
+  await page.getByRole('button', { name: '道路', exact: true }).click()
+  await page.getByTestId('remove-demo-ramp').click()
+  await page.getByRole('button', { name: '重算全部路线' }).click()
+  await page.getByRole('button', { name: '运输线', exact: true }).click()
+  await expect(page.getByTestId('line-status-line-1')).toHaveText('阻塞')
+  await page.screenshot({ path: 'artifacts/acceptance/terraced-blocked-transport.png', fullPage: true })
+  expect(errors).toEqual([])
+})
